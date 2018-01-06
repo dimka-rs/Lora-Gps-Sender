@@ -41,6 +41,7 @@
 #include "stm32f1xx_hal.h"
 
 /* USER CODE BEGIN Includes */
+#include <string.h>
 
 /* USER CODE END Includes */
 
@@ -55,6 +56,8 @@ RTC_HandleTypeDef hrtc;
 SPI_HandleTypeDef hspi1;
 SPI_HandleTypeDef hspi2;
 
+TIM_HandleTypeDef htim4;
+
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
@@ -62,18 +65,24 @@ PCD_HandleTypeDef hpcd_USB_FS;
 
 /* USER CODE BEGIN PV */
 /* Private variables ---------------------------------------------------------*/
-#define _DEBUG_
-
-#define MSG_START_LEN 7
-uint8_t MsgStart[] = "Start\r\n";
+#define MSG_START_LEN 9
+uint8_t MsgStart[] = "\r\nStart\r\n";
 #define MSG_LOOP_LEN 6
 uint8_t MsgLoop[] = "Loop\r\n";
-uint8_t Convert[sizeof(uint32_t)*2+1];
-#define GPS_RX_BUF_SIZE 256
-uint8_t GpsRxBuf[GPS_RX_BUF_SIZE];
-uint8_t *GpsRxBufPtr = GpsRxBuf;
+#define CONVERT_SIZE sizeof(uint32_t)*2+2
+uint8_t Convert[CONVERT_SIZE];
 #define DBG_RX_BUF_SIZE 10
-uint8_t DbgRxBuf[];
+uint8_t DbgRxBuf[DBG_RX_BUF_SIZE];
+
+
+#define  GPS_RX_BUF_SIZE 256
+uint8_t  GpsRxBuf[GPS_RX_BUF_SIZE];
+uint32_t GpsRxBufCnt;
+uint8_t  GpsRxDone;
+uint8_t  GpsGgaStr[] = "GGA";
+uint8_t  *GpsGgaStart;
+uint32_t GpsGgaLen;
+uint8_t  GpsNewLine[] = "\n\0";
 
 /* USER CODE END PV */
 
@@ -89,6 +98,7 @@ static void MX_I2C2_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_SPI2_Init(void);
 static void MX_RTC_Init(void);
+static void MX_TIM4_Init(void);
 
 /* USER CODE BEGIN PFP */
 /* Private function prototypes -----------------------------------------------*/
@@ -97,18 +107,38 @@ static void MX_RTC_Init(void);
 
 /* USER CODE BEGIN 0 */
 
+/* functions */
+
+void PrintInt(UART_HandleTypeDef *huart, uint32_t IntToPrint) {
+	uint32_t nibble;
+    for(uint32_t i=0; i<sizeof(uint32_t)*2; i++) {
+        nibble = IntToPrint % 16; 
+        if (nibble < 10) {
+            nibble += 0x30;
+        } else {
+            nibble +=0x37;
+        }
+        Convert[sizeof(uint32_t)*2-1-i] = nibble;
+        IntToPrint = IntToPrint / 16; 
+        Convert[sizeof(uint32_t)*2  ]='\r';
+        Convert[sizeof(uint32_t)*2+1]='\n';
+    }   
+    HAL_UART_Transmit_IT(huart, Convert, CONVERT_SIZE);
+}
+
 /* callbacks */
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 	/* GPS UART RX */
 	if (huart == &huart2) {
-		if (GpsRxBufPtr < GpsRxBuf + GPS_RX_BUF_SIZE) {
-		    GpsRxBufPtr++;
-			HAL_UART_Receive_IT(&huart2, GpsRxBufPtr, 1);
+		/* reset timer counter to prevent reaching reload value */
+		__HAL_TIM_SET_COUNTER(&htim4, 0);
+		HAL_UART_Receive_IT(&huart2, GpsRxBuf+GpsRxBufCnt, 1);
+		if (GpsRxBufCnt < GPS_RX_BUF_SIZE) {
+		    GpsRxBufCnt++;
+		} else {
+			HAL_UART_Transmit_IT(&huart1, MsgLoop, MSG_LOOP_LEN);
 		}
-	    #ifdef _DEBUG_
-		HAL_UART_Transmit_IT(&huart1, GpsRxBufPtr-1, 1);
-		#endif
 	}
 	/* Debug UART RX */
 	if (huart == &huart1) {
@@ -118,6 +148,16 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 	
 }
 
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
+	if (htim == &htim4) {
+		/*	silence is long enough to consider NMEA msg completed */
+		if (GpsRxBufCnt != 0) {
+			/* we got smth in buffer and should handle it */
+			GpsRxDone = 1;
+		}
+	}
+
+}
 
 /* USER CODE END 0 */
 
@@ -155,53 +195,40 @@ int main(void)
   MX_ADC1_Init();
   MX_SPI2_Init();
   MX_RTC_Init();
+  MX_TIM4_Init();
 
   /* USER CODE BEGIN 2 */
 
-  //printf("Semihosting test\r\n");
-  HAL_UART_Transmit(&huart1, MsgStart, MSG_START_LEN, 100);
-  /*
+	//printf("Semihosting test\r\n");
+	HAL_UART_Transmit(&huart1, MsgStart, MSG_START_LEN, 100);
+
+	/*
 	Start receiving debug input char by char
 	just for test
-  */
-   HAL_UART_Receive_IT(&huart2, GpsRxBuf, 1);
+	*/
+	HAL_UART_Receive_IT(&huart2, GpsRxBuf, 1);
 
+	/*
+   	Start receiving NMEA char by char
+   	Next char rx called in callback
+   	*/
+	GpsRxBufCnt = 0;
+	GpsRxDone = 0;
+  	HAL_UART_Receive_IT(&huart1, DbgRxBuf, 1);
 
+	/*
+	Start timer 4 to get event
+	after rx timeout
+	*/
+	HAL_TIM_Base_Start_IT(&htim4);
 
-  /*
-   *  Start receiving NMEA char by char
-   *  Next char rx called in callback
-   */
-  HAL_UART_Receive_IT(&huart1, DbgRxBuf, 1);
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-
-  uint32_t CurTick;
-  uint8_t nibble;
   while (1)
   {
-    CurTick = HAL_GetTick();
-    for(int i=0; i<sizeof(uint32_t)*2; i++) {
-	nibble = CurTick % 16;
-	if (nibble < 10) {
-		nibble += 0x30;
-	} else {
-		nibble +=0x37;
-	}
-	Convert[sizeof(uint32_t)*2-1-i] = nibble;
-	CurTick = CurTick / 16;
-    }
-    Convert[sizeof(uint32_t)*2]=0x20; //add space after
-
-    //HAL_UART_Transmit_IT(&huart1, Convert, sizeof(uint32_t)*2+1);
-    /*	got to wait until 1st msg is sent
-    	TODO: implement single msg buffer
-	*/
-    //while(HAL_UART_GetState(&huart1) != HAL_UART_STATE_READY);
-    //HAL_UART_Transmit_IT(&huart1, MsgLoop, MSG_LOOP_LEN);
 
     /* GPIO */
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
@@ -210,6 +237,20 @@ int main(void)
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
     HAL_GPIO_TogglePin(GPS_RESET_GPIO_Port, GPS_RESET_Pin);
     HAL_Delay(500);
+
+	/* GPS Rx Done */
+	if(GpsRxDone) {
+		GpsRxDone = 0;
+		GpsRxBuf[GpsRxBufCnt++]='\r';
+		GpsRxBuf[GpsRxBufCnt++]='\n';
+		GpsRxBuf[GpsRxBufCnt++]='\n';
+		GpsRxBuf[GpsRxBufCnt++]='\0';
+		//HAL_UART_Transmit_IT(&huart1, GpsRxBuf, GpsRxBufCnt-1);
+		GpsRxBufCnt = 0;
+		GpsGgaStart = (uint8_t*) strstr((char*) GpsRxBuf, (char*) GpsGgaStr);
+		GpsGgaLen   = (uint8_t*) strstr((char*) GpsRxBuf, (char*) GpsNewLine) - GpsGgaStart + 1;
+		HAL_UART_Transmit_IT(&huart1, GpsGgaStart, GpsGgaLen);
+	}
 
   /* USER CODE END WHILE */
 
@@ -438,6 +479,39 @@ static void MX_SPI2_Init(void)
   hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
   hspi2.Init.CRCPolynomial = 10;
   if (HAL_SPI_Init(&hspi2) != HAL_OK)
+  {
+    _Error_Handler(__FILE__, __LINE__);
+  }
+
+}
+
+/* TIM4 init function */
+static void MX_TIM4_Init(void)
+{
+
+  TIM_ClockConfigTypeDef sClockSourceConfig;
+  TIM_MasterConfigTypeDef sMasterConfig;
+
+  htim4.Instance = TIM4;
+  htim4.Init.Prescaler = 48;
+  htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim4.Init.Period = 1000;
+  htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
+  {
+    _Error_Handler(__FILE__, __LINE__);
+  }
+
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim4, &sClockSourceConfig) != HAL_OK)
+  {
+    _Error_Handler(__FILE__, __LINE__);
+  }
+
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
   {
     _Error_Handler(__FILE__, __LINE__);
   }
