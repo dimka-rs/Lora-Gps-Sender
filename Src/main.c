@@ -67,13 +67,17 @@ PCD_HandleTypeDef hpcd_USB_FS;
 /* Private variables ---------------------------------------------------------*/
 #define MSG_START_LEN 9
 uint8_t MsgStart[] = "\r\nStart\r\n";
-#define MSG_LOOP_LEN 6
-uint8_t MsgLoop[] = "Loop\r\n";
+#define MSG_BUF_OVF_LEN 18
+uint8_t MsgBufOvf[] = "Buffer Overflow!\r\n";
+#define MSG_NO_GGA_LEN 15
+uint8_t MsgNoGga[] = "No GGA found!\r\n";
+#define MSG_NO_LEN_LEN 15
+uint8_t MsgNoLen[] = "No Len found!\r\n";
+
 #define CONVERT_SIZE sizeof(uint32_t)*2+2
 uint8_t Convert[CONVERT_SIZE];
 #define DBG_RX_BUF_SIZE 10
 uint8_t DbgRxBuf[DBG_RX_BUF_SIZE];
-
 
 #define  GPS_RX_BUF_SIZE 256
 uint8_t  GpsRxBuf[GPS_RX_BUF_SIZE];
@@ -83,6 +87,21 @@ uint8_t  GpsGgaStr[] = "GGA";
 uint8_t  *GpsGgaStart;
 uint32_t GpsGgaLen;
 uint8_t  GpsNewLine[] = "\n\0";
+
+struct GgaData {
+	uint8_t Time[10];
+	uint8_t LatVal[9];
+	uint8_t LatHem[1];
+	uint8_t LonVal[10];
+	uint8_t LonHem[1];
+	uint8_t Fix[1];
+	uint8_t Sats[2];
+	uint8_t Hdop[5];
+	uint8_t Alt[5];
+	uint8_t AltM[1];
+	uint8_t Height[5];
+	uint8_t HeightM[1];
+} gga;
 
 /* USER CODE END PV */
 
@@ -112,20 +131,34 @@ static void MX_TIM4_Init(void);
 void PrintInt(UART_HandleTypeDef *huart, uint32_t IntToPrint) {
 	uint32_t nibble;
     for(uint32_t i=0; i<sizeof(uint32_t)*2; i++) {
-        nibble = IntToPrint % 16; 
+        nibble = IntToPrint % 16;
         if (nibble < 10) {
             nibble += 0x30;
         } else {
             nibble +=0x37;
         }
         Convert[sizeof(uint32_t)*2-1-i] = nibble;
-        IntToPrint = IntToPrint / 16; 
+        IntToPrint = IntToPrint / 16;
         Convert[sizeof(uint32_t)*2  ]='\r';
         Convert[sizeof(uint32_t)*2+1]='\n';
-    }   
+    }
     HAL_UART_Transmit_IT(huart, Convert, CONVERT_SIZE);
 }
-
+/*
+void CopyToComma(uint8_t** CopyFrom, uint8_t* CopyTo) {
+	while(1){
+		if(**CopyFrom == ',') {
+			*CopyTo = '\0';
+			*CopyFrom++;
+			break;
+		} else {
+			*CopyTo = **CopyFrom;
+			CopyTo++;
+			*CopyFrom++;
+		}
+	}
+}
+*/
 /* callbacks */
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
@@ -137,7 +170,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 		if (GpsRxBufCnt < GPS_RX_BUF_SIZE) {
 		    GpsRxBufCnt++;
 		} else {
-			HAL_UART_Transmit_IT(&huart1, MsgLoop, MSG_LOOP_LEN);
+			HAL_UART_Transmit_IT(&huart1, MsgBufOvf, MSG_BUF_OVF_LEN);
 		}
 	}
 	/* Debug UART RX */
@@ -199,7 +232,6 @@ int main(void)
 
   /* USER CODE BEGIN 2 */
 
-	//printf("Semihosting test\r\n");
 	HAL_UART_Transmit(&huart1, MsgStart, MSG_START_LEN, 100);
 
 	/*
@@ -248,8 +280,19 @@ int main(void)
 		//HAL_UART_Transmit_IT(&huart1, GpsRxBuf, GpsRxBufCnt-1);
 		GpsRxBufCnt = 0;
 		GpsGgaStart = (uint8_t*) strstr((char*) GpsRxBuf, (char*) GpsGgaStr);
-		GpsGgaLen   = (uint8_t*) strstr((char*) GpsRxBuf, (char*) GpsNewLine) - GpsGgaStart + 1;
-		HAL_UART_Transmit_IT(&huart1, GpsGgaStart, GpsGgaLen);
+		if(GpsGgaStart != NULL) {
+			GpsGgaStart += 4;	//skip GGA,
+			GpsGgaLen = ((uint8_t*) strstr((char*) GpsRxBuf, (char*) GpsNewLine)) - GpsGgaStart + 1;
+			if(GpsGgaLen > GPS_RX_BUF_SIZE) {
+				HAL_UART_Transmit_IT(&huart1, MsgNoLen, MSG_NO_LEN_LEN);
+			} else {
+				HAL_UART_Transmit_IT(&huart1, GpsGgaStart, GpsGgaLen);
+			}
+		} else {
+			HAL_UART_Transmit_IT(&huart1, MsgNoGga, MSG_NO_GGA_LEN);
+		}
+		//CopyToComma(&GpsGgaStart, gga.Time);
+		//HAL_UART_Transmit_IT(&huart1, gga.Time, strlen((char*)gga.Time));
 	}
 
   /* USER CODE END WHILE */
