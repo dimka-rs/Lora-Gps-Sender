@@ -86,7 +86,7 @@ uint8_t  GpsRxDone;
 uint8_t  GpsGgaStr[] = "GGA";
 uint8_t  *GpsGgaStart;
 uint32_t GpsGgaLen;
-uint8_t  GpsNewLine[] = "\n\0";
+uint8_t  GpsNewLine[] = "\n\r\0";
 
 struct GgaData {
 	uint8_t Time[10];
@@ -144,21 +144,21 @@ void PrintInt(UART_HandleTypeDef *huart, uint32_t IntToPrint) {
     }
     HAL_UART_Transmit_IT(huart, Convert, CONVERT_SIZE);
 }
-/*
-void CopyToComma(uint8_t** CopyFrom, uint8_t* CopyTo) {
+
+void CopyToComma(uint8_t* CopyFrom, uint8_t* CopyTo) {
 	while(1){
-		if(**CopyFrom == ',') {
+		if(*CopyFrom == ',') {
 			*CopyTo = '\0';
-			*CopyFrom++;
+			CopyFrom++;
 			break;
 		} else {
-			*CopyTo = **CopyFrom;
+			*CopyTo = *CopyFrom;
 			CopyTo++;
-			*CopyFrom++;
+			CopyFrom++;
 		}
 	}
 }
-*/
+
 /* callbacks */
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
@@ -265,10 +265,10 @@ int main(void)
     /* GPIO */
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
     HAL_GPIO_TogglePin(GPS_RESET_GPIO_Port, GPS_RESET_Pin);
-    HAL_Delay(500);
+    HAL_Delay(100);
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
     HAL_GPIO_TogglePin(GPS_RESET_GPIO_Port, GPS_RESET_Pin);
-    HAL_Delay(500);
+    HAL_Delay(100);
 
 	/* GPS Rx Done */
 	if(GpsRxDone) {
@@ -284,15 +284,18 @@ int main(void)
 			GpsGgaStart += 4;	//skip GGA,
 			GpsGgaLen = ((uint8_t*) strstr((char*) GpsRxBuf, (char*) GpsNewLine)) - GpsGgaStart + 1;
 			if(GpsGgaLen > GPS_RX_BUF_SIZE) {
+				/* Failed to calculate len */
 				HAL_UART_Transmit_IT(&huart1, MsgNoLen, MSG_NO_LEN_LEN);
 			} else {
-				HAL_UART_Transmit_IT(&huart1, GpsGgaStart, GpsGgaLen);
+				/* OK */
+				//HAL_UART_Transmit_IT(&huart1, GpsGgaStart, GpsGgaLen);
 			}
 		} else {
+			/* Failed to find GGA substring */
 			HAL_UART_Transmit_IT(&huart1, MsgNoGga, MSG_NO_GGA_LEN);
 		}
-		//CopyToComma(&GpsGgaStart, gga.Time);
-		//HAL_UART_Transmit_IT(&huart1, gga.Time, strlen((char*)gga.Time));
+		CopyToComma(GpsGgaStart, gga.Time);
+		HAL_UART_Transmit_IT(&huart1, (uint8_t*)&gga.Time, strlen((char*)gga.Time));
 	}
 
   /* USER CODE END WHILE */
