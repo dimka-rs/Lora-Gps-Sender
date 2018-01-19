@@ -86,10 +86,14 @@ uint8_t  GpsRxDone;
 uint8_t  GpsGgaStr[] = "GGA";
 uint8_t  *GpsGgaStart;
 uint32_t GpsGgaLen;
-uint8_t  GpsNewLine[] = "\n\r\0";
+uint8_t  GpsEndOfLine[] = "\r\n\0";
+
+#define TX_BUF_SIZE 100
+uint8_t TxBuf[TX_BUF_SIZE];
+uint8_t TxBufCnt = 0;
 
 struct GgaData {
-	uint8_t Time[10];
+	uint8_t Time[11];
 	uint8_t LatVal[9];
 	uint8_t LatHem[1];
 	uint8_t LonVal[10];
@@ -145,18 +149,22 @@ void PrintInt(UART_HandleTypeDef *huart, uint32_t IntToPrint) {
     HAL_UART_Transmit_IT(huart, Convert, CONVERT_SIZE);
 }
 
-void CopyToComma(uint8_t* CopyFrom, uint8_t* CopyTo) {
+uint16_t CopyToComma(uint8_t* CopyFrom, uint8_t* CopyTo) {
+	uint16_t Counter = 0;
 	while(1){
 		if(*CopyFrom == ',') {
 			*CopyTo = '\0';
 			CopyFrom++;
+			Counter++;
 			break;
 		} else {
 			*CopyTo = *CopyFrom;
 			CopyTo++;
 			CopyFrom++;
+			Counter++;
 		}
 	}
+	return Counter;
 }
 
 /* callbacks */
@@ -185,6 +193,8 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 	if (htim == &htim4) {
 		/*	silence is long enough to consider NMEA msg completed */
 		if (GpsRxBufCnt != 0) {
+			/* Abort ongoing receive from GPS */
+			HAL_UART_AbortReceive_IT(&huart2);
 			/* we got smth in buffer and should handle it */
 			GpsRxDone = 1;
 		}
@@ -238,7 +248,7 @@ int main(void)
 	Start receiving debug input char by char
 	just for test
 	*/
-	HAL_UART_Receive_IT(&huart2, GpsRxBuf, 1);
+	HAL_UART_Receive_IT(&huart1, DbgRxBuf, 1);
 
 	/*
    	Start receiving NMEA char by char
@@ -246,7 +256,7 @@ int main(void)
    	*/
 	GpsRxBufCnt = 0;
 	GpsRxDone = 0;
-  	HAL_UART_Receive_IT(&huart1, DbgRxBuf, 1);
+  	HAL_UART_Receive_IT(&huart2, GpsRxBuf, 1);
 
 	/*
 	Start timer 4 to get event
@@ -273,29 +283,43 @@ int main(void)
 	/* GPS Rx Done */
 	if(GpsRxDone) {
 		GpsRxDone = 0;
+		GpsRxBuf[GpsRxBufCnt++]='<';
 		GpsRxBuf[GpsRxBufCnt++]='\r';
-		GpsRxBuf[GpsRxBufCnt++]='\n';
 		GpsRxBuf[GpsRxBufCnt++]='\n';
 		GpsRxBuf[GpsRxBufCnt++]='\0';
 		//HAL_UART_Transmit_IT(&huart1, GpsRxBuf, GpsRxBufCnt-1);
 		GpsRxBufCnt = 0;
+		/* Restart aborted receive from buffer start */
+		HAL_UART_Receive_IT(&huart2, GpsRxBuf, 1);
+		
 		GpsGgaStart = (uint8_t*) strstr((char*) GpsRxBuf, (char*) GpsGgaStr);
-		if(GpsGgaStart != NULL) {
+		if(GpsGgaStart == NULL) {
+			// Failed to find GGA substring
+            HAL_UART_Transmit_IT(&huart1, MsgNoGga, MSG_NO_GGA_LEN);
+		} else {
 			GpsGgaStart += 4;	//skip GGA,
-			GpsGgaLen = ((uint8_t*) strstr((char*) GpsRxBuf, (char*) GpsNewLine)) - GpsGgaStart + 1;
+			GpsGgaLen = ((uint8_t*) strstr((char*) GpsRxBuf, (char*) GpsEndOfLine)) - GpsGgaStart + 1;
 			if(GpsGgaLen > GPS_RX_BUF_SIZE) {
-				/* Failed to calculate len */
+				// Failed to calculate len
 				HAL_UART_Transmit_IT(&huart1, MsgNoLen, MSG_NO_LEN_LEN);
 			} else {
-				/* OK */
+				// OK
 				//HAL_UART_Transmit_IT(&huart1, GpsGgaStart, GpsGgaLen);
+				uint16_t GgaOffset = 0;
+				GgaOffset += CopyToComma(GpsGgaStart+GgaOffset, gga.Time);
+				GgaOffset += CopyToComma(GpsGgaStart+GgaOffset, gga.LatVal);
+				GgaOffset += CopyToComma(GpsGgaStart+GgaOffset, gga.LatHem);
+
+				TxBufCnt = 0;
+				TxBufCnt += sprintf((char*)(TxBuf+TxBufCnt),"\r\n");
+				TxBufCnt += sprintf((char*)(TxBuf+TxBufCnt),"Time:\t%s\r\n",   gga.Time);
+				TxBufCnt += sprintf((char*)(TxBuf+TxBufCnt),"LatVal:\t%s\r\n", gga.LatVal);
+				TxBufCnt += sprintf((char*)(TxBuf+TxBufCnt),"LatHem:\t%s\r\n", gga.LatHem);
+
+				HAL_UART_Transmit_IT(&huart1, TxBuf, TxBufCnt);
+		
 			}
-		} else {
-			/* Failed to find GGA substring */
-			HAL_UART_Transmit_IT(&huart1, MsgNoGga, MSG_NO_GGA_LEN);
 		}
-		CopyToComma(GpsGgaStart, gga.Time);
-		HAL_UART_Transmit_IT(&huart1, (uint8_t*)&gga.Time, strlen((char*)gga.Time));
 	}
 
   /* USER CODE END WHILE */
@@ -541,7 +565,7 @@ static void MX_TIM4_Init(void)
   htim4.Instance = TIM4;
   htim4.Init.Prescaler = 48;
   htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim4.Init.Period = 1000;
+  htim4.Init.Period = 10000;
   htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
